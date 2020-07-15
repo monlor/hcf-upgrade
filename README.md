@@ -1,5 +1,7 @@
 ### hcf-upgrade
+
 [![GitHub release](https://img.shields.io/github/release/monlor/hcf-upgrade.svg)](https://github.com/monlor/hcf-upgrade/releases)
+一款Rancher环境升级脚本，将目标环境的镜像版本同步升级到来源环境的版本，升级前会对比apollo配置信息，确认后才执行升级动作
 
 ### 安装教程
 
