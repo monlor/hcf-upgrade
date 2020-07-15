@@ -13,6 +13,7 @@
 
 ### 帮助
 
+```
 Upgrade HCF project from source env to target env
 Version: 0.0.1
 Usage: hcfup -c [config file]
@@ -40,7 +41,7 @@ Config File Example:
 
 Use Example:
 	hcfup -c config.properties
-
+```
 
 ### 使用姿势
 
