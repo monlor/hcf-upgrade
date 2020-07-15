@@ -1,0 +1,198 @@
+#!/bin/bash -e
+# 更新来源环境的镜像版本到目标环境
+# dependences: rancher-cli kubectl
+
+version=0.0.1
+
+TMPDIR=$(mktemp -d)
+
+source_image_file=${TMPDIR}/source_image.txt
+
+trap 'rm -rf ${TMPDIR} && exit' INT
+
+help() {
+	cat << EOF
+Upgrade HCF project from source env to target env
+Version: ${version}
+Usage: ${0} -c [config file]
+Options:
+	-c [config file]		
+	-h 			show help info
+	-v 			show version
+	
+Config File Example:
+	source_rancher_url=https://22.22.22.22:9043/k8s/clusters/22
+	source_rancher_token=token-22
+	source_rancher_project=22:22
+	source_rancher_namespace=default
+	source_apollo_url=http://22.22.22.22:8180
+	source_apollo_namespace=common,application
+	source_apollo_cluster=xxxx
+	target_rancher_url=https://11.11.11.11:9043/k8s/clusters/11
+	target_rancher_token=token-11
+	target_rancher_project=11:11
+	target_rancher_namespace=default
+	target_apollo_url=http://11.11.11.11:8180
+	target_apollo_namespace=common,application
+	target_apollo_cluster=default
+	skip_workload=app1,app2
+
+Use Example:
+	${0} -c config.properties
+
+EOF
+}
+
+parse_args() {
+
+	local config_file
+
+	while getopts "c:hv" opt; do
+		case $opt in
+	    c) config_file=$OPTARG ;;
+	    h) 
+				help 
+				return 1
+				;;
+			v)
+				echo "version: ${version}"
+				return 1
+				;;
+	    \?)
+	      echo "Invalid option: -$OPTARG" 
+	      help
+	      return 1
+	      ;;
+	  esac
+	done
+
+	[ -f "${config_file}" ] && config_file="./config.properties"
+	if [ -n "${config_file}" ]; then
+		echo "加载配置文件：${config_file}"
+		source "${config_file}"
+	else
+		echo "配置文件未找到！"
+		help
+		return 1
+	fi
+
+	return 0
+}
+
+# appid
+compare_apollo_config() {
+
+	local appid=${1}
+	local namespace
+	for namespace in `echo ${source_apollo_namespace} | tr ',' ' '`; do
+		# echo "[${namespace}]" >> ${TMPDIR}/${appid}_source.properties
+		curl -sL ${source_apollo_url}/configfiles/${appid}/${source_apollo_cluster}/${namespace} | cut -d '=' -f1 | sort -u >> ${TMPDIR}/${appid}_source.properties
+	done
+
+	for namespace in `echo ${target_apollo_namespace} | tr ',' ' '`; do
+		# echo "[${namespace}]" >> ${TMPDIR}/${appid}_target.properties
+		curl -sL ${target_apollo_url}/configfiles/${appid}/${target_apollo_cluster}/${namespace} | cut -d '=' -f1 | sort -u >> ${TMPDIR}/${appid}_target.properties
+	done
+
+	echo "目标环境中多出的配置信息："
+	# 输出来源配置没有，目标配置中已经有的行，表示来源配置中有配置删除
+	grep -vwf ${TMPDIR}/${appid}_source.properties ${TMPDIR}/${appid}_target.properties
+	echo "来源环境中多出的配置信息："
+	grep -vwf ${TMPDIR}/${appid}_target.properties ${TMPDIR}/${appid}_source.properties
+
+}
+
+# rancher_url rancher_token rancher_project
+rancher.login() {
+	rancher login "${1}" --token "${2}" --context "${3}" --skip-verify > /dev/null
+}
+
+rancher.workload_name_list() {
+	rancher kubectl get deploy -o name | cut -d'/' -f2
+}
+
+# workload namespace
+rancher.get_image() {
+	rancher kubectl get deploy ${1} -o jsonpath="{..image}" -n ${2}
+}
+
+# workload namespace
+rancher.get_env() {
+	rancher kubectl get deploy ${1} -o jsonpath="{..env}" -n ${2}
+}
+
+# workload image namespace
+rancher.set_image() {
+		rancher kubectl set image deploy "${1}" "${1}"="${2}" -n "${3}"
+}
+
+get_source_image_list() {
+	local workload
+	local image
+	local env
+	for workload in `rancher.workload_name_list`; do
+		image=`rancher.get_image ${workload} ${source_rancher_namespace}`
+		env=`rancher.get_env ${workload} ${source_rancher_namespace}`
+		echo ${workload}!${image}!${env} >> ${source_image_file}
+	done
+}
+
+# workload
+get_source_image_version() {
+	cat ${source_image_file} | grep -E "^${1}!" | cut -d'!' -f2
+}
+
+# workload
+get_source_image_env() {
+	cat ${source_image_file} | grep -E "^${1}!" | cut -d'!' -f3
+}
+
+# workload
+# 0 true则表示跳过
+skip_workload() {
+	local res=`echo ${skip_workload} | tr ',' '\n' | grep -E "^${1}$"`
+	test -n "${res}" && return 0 || return 1
+}
+
+main() {
+
+	local source_image
+	local target_image
+	local source_env
+	local target_env
+	parse_args $@ || return
+	echo "临时目录：${TMPDIR}"
+	# 获取来源镜像版本列表
+	echo "获取来源镜像版本列表..."
+	rancher.login ${source_rancher_url} ${source_rancher_token} ${source_rancher_project}
+	get_source_image_list 
+	echo "开始分析目标环境工作负载情况..."
+	# 登录目标环境
+	rancher.login ${target_rancher_url} ${target_rancher_token} ${target_rancher_project}
+	# 遍历目标rancher，对比升级
+	for workload in `rancher.workload_name_list`; do
+		skip_workload ${workload} && continue
+		target_image=`rancher.get_image ${workload} ${target_rancher_namespace}`
+		source_image=`get_source_image_version ${workload}`
+		target_env=`rancher.get_env ${workload} ${target_rancher_namespace}`
+		source_env=`get_source_image_env ${workload}`
+		[ -z "${target_image}" -o -z "${source_image}" ] && echo "${workload}来源镜像或目标镜像获取为空！" && continue
+		[ "${target_image}" = "${source_image}" ] && echo "${workload}来源镜像与目标镜像相同，跳过更新..." && continue 
+		echo "############### ${workload} ###############"
+		echo "来源镜像：${source_image}"
+		echo "目标镜像：${target_image}"
+		echo "来源环境变量：${source_env}"
+		echo "目标环境变量：${target_env}"
+		compare_apollo_config ${workload}
+		echo "############### ${workload} ###############"
+		read -p "即将部署来源镜像到目标环境上，请确认以上修改？[y/n/e] " res
+		[ "${res}" = "e" ] && rm -rf ${TMPDIR} && exit
+		[ "${res}" = "y" ] && rancher.set_image ${workload} ${source_image} ${target_rancher_namespace}
+	done
+
+
+}
+
+main $@
+
+rm -rf ${TMPDIR}
