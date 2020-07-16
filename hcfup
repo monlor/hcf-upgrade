@@ -2,7 +2,7 @@
 # 更新来源环境的镜像版本到目标环境
 # dependences: rancher-cli kubectl
 
-version=0.0.1
+version=0.0.2
 
 TMPDIR=$(mktemp -d)
 
@@ -35,7 +35,8 @@ Config File Example:
 	target_apollo_url=http://11.11.11.11:8180
 	target_apollo_namespace=common,application
 	target_apollo_cluster=default
-	skip_workload=app1,app2
+	skip_workload=app1\|app2
+	skip_apollo=web-app1
 
 Use Example:
 	${0} -c config.properties
@@ -66,8 +67,8 @@ parse_args() {
 	  esac
 	done
 
-	[ -f "${config_file}" ] && config_file="./config.properties"
-	if [ -n "${config_file}" ]; then
+	[ -z "${config_file}" ] && config_file="./config.properties"
+	if [ -f "${config_file}" ]; then
 		echo "加载配置文件：${config_file}"
 		source "${config_file}"
 	else
@@ -107,8 +108,9 @@ rancher.login() {
 	rancher login "${1}" --token "${2}" --context "${3}" --skip-verify > /dev/null
 }
 
+# namespace
 rancher.workload_name_list() {
-	rancher kubectl get deploy -o name | cut -d'/' -f2
+	rancher kubectl get deploy -o name -n ${1} | cut -d'/' -f2
 }
 
 # workload namespace
@@ -130,7 +132,7 @@ get_source_image_list() {
 	local workload
 	local image
 	local env
-	for workload in `rancher.workload_name_list`; do
+	for workload in `rancher.workload_name_list ${source_rancher_namespace}`; do
 		image=`rancher.get_image ${workload} ${source_rancher_namespace}`
 		env=`rancher.get_env ${workload} ${source_rancher_namespace}`
 		echo ${workload}!${image}!${env} >> ${source_image_file}
@@ -150,7 +152,15 @@ get_source_image_env() {
 # workload
 # 0 true则表示跳过
 skip_workload() {
-	local res=`echo ${skip_workload} | tr ',' '\n' | grep -E "^${1}$"`
+	local res=`echo ${1} | tr ',' '\n' | grep -E "^${skip_workload}$"`
+	test -n "${res}" && return 0 || return 1
+}
+
+# workload
+# 0 true则表示跳过
+# 支持正则匹配
+skip_apollo() {
+	local res=`echo ${1} | tr ',' '\n' | grep -E "^${skip_apollo}$"`
 	test -n "${res}" && return 0 || return 1
 }
 
@@ -170,7 +180,7 @@ main() {
 	# 登录目标环境
 	rancher.login ${target_rancher_url} ${target_rancher_token} ${target_rancher_project}
 	# 遍历目标rancher，对比升级
-	for workload in `rancher.workload_name_list`; do
+	for workload in `rancher.workload_name_list ${target_rancher_namespace}`; do
 		skip_workload ${workload} && continue
 		target_image=`rancher.get_image ${workload} ${target_rancher_namespace}`
 		source_image=`get_source_image_version ${workload}`
@@ -183,7 +193,7 @@ main() {
 		echo "目标镜像：${target_image}"
 		echo "来源环境变量：${source_env}"
 		echo "目标环境变量：${target_env}"
-		compare_apollo_config ${workload}
+		skip_apollo ${workload} || compare_apollo_config ${workload}
 		echo "############### ${workload} ###############"
 		read -p "即将部署来源镜像到目标环境上，请确认以上修改？[y/n/e] " res
 		[ "${res}" = "e" ] && rm -rf ${TMPDIR} && exit
